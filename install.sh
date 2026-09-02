@@ -367,7 +367,9 @@ EOF
 systemctl daemon-reload
 systemctl restart earlyoom.service
 sleep 1
-EO_PID=$(pgrep -x earlyoom | head -1)
+# set -e + pipefail 주의: pgrep 이 못 찾으면 파이프라인 상태가 1 이 되어
+# 대입문 자체가 실패로 취급되고 스크립트가 그 자리에서 종료된다. || true 필수.
+EO_PID=$(pgrep -x earlyoom | head -1) || true
 MEM_TOTAL_MB=$(awk '/MemTotal/{print int($2/1024)}' /proc/meminfo)
 T1="${EARLYOOM_THRESHOLDS%%,*}"; T2="${EARLYOOM_THRESHOLDS##*,}"
 printf '  -m %s (여유 %.1fGiB 에서 경고, %.1fGiB 에서 kill)\n' \
@@ -477,9 +479,15 @@ for name in "${REMOTE_PROCS[@]}"; do
 done
 echo "  실행 중인 원격 데몬에 oom_score_adj=-1000 직접 적용 (재시작 없음)"
 for name in "${REMOTE_PROCS[@]}"; do
-  p=$(pgrep -x "$name" 2>/dev/null | head -1)
-  [[ -n $p ]] && printf '    %-12s pid=%-8s oom_score_adj=%s\n' \
-    "$name" "$p" "$(cat /proc/$p/oom_score_adj)"
+  # || true 가 없으면 해당 데몬이 실행 중이 아닐 때 pgrep 실패 -> pipefail ->
+  # 대입문 실패 -> set -e 로 스크립트가 여기서 종료된다.
+  p=$(pgrep -x "$name" 2>/dev/null | head -1) || true
+  if [[ -n $p ]]; then
+    printf '    %-12s pid=%-8s oom_score_adj=%s\n' \
+      "$name" "$p" "$(cat "/proc/$p/oom_score_adj")"
+  else
+    printf '    %-12s (실행 중 아님)\n' "$name"
+  fi
 done
 
 say "완료. 백업: $BACKUP"
