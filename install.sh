@@ -233,18 +233,31 @@ backup /etc/modprobe.d/hw-watchdog.conf
 cat > /etc/modprobe.d/hw-watchdog.conf <<'EOF'
 options iTCO_wdt nowayout=0
 options sp5100_tco nowayout=0
+# BMC 워치독. action=reset 이면 핑이 끊겼을 때 BMC 가 직접 리셋을 건다.
+# start_now=0 이라 systemd 가 열기 전에는 카운트가 시작되지 않는다.
+options ipmi_watchdog action=reset timeout=60 nowayout=0 start_now=0
 # softdog 폴백: 타임아웃 시 패닉을 유발해 로그를 남기고 kernel.panic 으로 재부팅
 options softdog soft_panic=1 soft_margin=60
 EOF
 
-# 후보 결정: 명시값 > CPU 벤더 자동 판별 > softdog
+# 후보 결정: 명시값 > 칩셋 워치독 > BMC(IPMI) 워치독 > softdog
+#
+# 서버 보드에서는 칩셋 워치독이 안 붙는 경우가 많다. BMC 가 TCO 영역을 점유해
+# lpc_ich 가 MFD 셀을 만들지 못하기 때문이다. 커널 로그에 이렇게 남는다:
+#   lpc_ich 0000:00:1f.0: I/O space for ACPI uninitialized
+#   lpc_ich 0000:00:1f.0: No MFD cells added
+# 이때 /dev/ipmi0 이 있으면 ipmi_watchdog 이 훨씬 낫다. BMC 가 직접 도는
+# 진짜 하드웨어 워치독이라 커널이 완전히 얼어붙어도 리셋이 걸린다.
 if [[ -n "$WDT_MODULE" ]]; then
-  CANDIDATES=("$WDT_MODULE" softdog)
+  CANDIDATES=("$WDT_MODULE")
 elif grep -qi 'vendor_id.*AuthenticAMD' /proc/cpuinfo; then
-  CANDIDATES=(sp5100_tco softdog)
+  CANDIDATES=(sp5100_tco)
 else
-  CANDIDATES=(iTCO_wdt softdog)
+  CANDIDATES=(iTCO_wdt)
 fi
+# BMC 가 있으면 softdog 보다 먼저 시도한다.
+[[ -e /dev/ipmi0 || -e /dev/ipmi/0 || -e /dev/ipmidev/0 ]] && CANDIDATES+=(ipmi_watchdog)
+CANDIDATES+=(softdog)
 
 WDT_MOD=""
 for m in "${CANDIDATES[@]}"; do
@@ -259,8 +272,18 @@ if [[ -z "$WDT_MOD" ]]; then
 else
   echo "  사용 모듈: $WDT_MOD"
   sed 's/^/  identity: /' /sys/class/watchdog/watchdog0/identity 2>/dev/null || true
-  [[ "$WDT_MOD" == softdog ]] && \
-    warn "softdog 폴백입니다. 커널이 완전히 얼어붙으면 동작하지 않습니다."
+  case "$WDT_MOD" in
+    softdog)
+      warn "softdog 폴백입니다. 커널이 완전히 얼어붙으면 동작하지 않습니다."
+      if journalctl -k -b 0 --no-pager 2>/dev/null | grep -q 'No MFD cells added'; then
+        warn "원인: lpc_ich 가 MFD 셀을 만들지 못했습니다 (BMC 가 TCO 영역 점유)."
+        warn "이 보드에서는 칩셋 워치독을 쓸 수 없습니다."
+      fi
+      ;;
+    ipmi_watchdog)
+      echo "  BMC 워치독입니다. 칩셋 워치독보다 낫습니다 (BMC 가 직접 리셋)."
+      ;;
+  esac
 
   # --- 부팅 시 자동 로드 -------------------------------------------------
   # 표준 경로 두 개가 모두 막혀 있다:

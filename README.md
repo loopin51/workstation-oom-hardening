@@ -93,6 +93,46 @@ blacklist는 **alias 자동 로드만** 막고 명시적 `modprobe`는 막지 �
 21:25:14  Watchdog running with a timeout of 1min.
 ```
 
+### 서버 보드에서는 칩셋 워치독이 아예 안 붙는다
+
+ASUS Z11PA-U12(Xeon Gold) 두 대에서 `iTCO_wdt`가 붙지 않았습니다. 커널 로그가 원인을 그대로 말해줍니다.
+
+```
+lpc_ich 0000:00:1f.0: I/O space for ACPI uninitialized
+lpc_ich 0000:00:1f.0: No MFD cells added
+```
+
+`lpc_ich`가 MFD 셀을 만들지 못하면 `iTCO_wdt`가 바인딩할 플랫폼 장치 자체가 생기지 않습니다. BMC가 TCO 영역을 점유해서 생기는 일이라 BIOS 토글로 해결되지 않습니다. 같은 커널·같은 배포판인데도 데스크톱 보드(Core Ultra 9 285K)에서는 정상적으로 붙었습니다.
+
+이런 보드에는 **BMC 워치독**이 있습니다. `/dev/ipmi0`이 보이면 `ipmi_watchdog`을 씁니다. BMC가 직접 도는 진짜 하드웨어 워치독이라 커널이 완전히 얼어붙어도 리셋이 걸리고, 칩셋 워치독보다 오히려 낫습니다. `install.sh`가 자동으로 이 순서를 탑니다.
+
+```
+칩셋 워치독 (iTCO_wdt / sp5100_tco)
+  → BMC 워치독 (ipmi_watchdog, /dev/ipmi0 이 있을 때)
+    → softdog 폴백
+```
+
+`softdog`까지 내려가면 커널이 완전히 얼었을 때는 못 잡습니다. 그 경우 `install.sh`가 `No MFD cells added` 로그를 확인해서 원인을 함께 알려줍니다.
+
+### `pgrep <이름>`으로 검증하면 엉뚱한 프로세스를 본다
+
+한 서버에서 `tailscaled`의 `oom_score_adj`가 0으로 보여 보호가 안 된 줄 알았습니다. 실제로는 tailscaled가 두 개였습니다.
+
+```
+pid=1408  /home/user/tailscale/tailscaled   cgroup=/system.slice/cron.service        adj=0
+pid=1933  /usr/sbin/tailscaled              cgroup=/system.slice/tailscaled.service  adj=-1000
+```
+
+`pgrep -x tailscaled | head -1`이 PID가 낮은 쪽, 즉 cron이 띄운 별개 인스턴스를 집었습니다. `verify.sh`는 유닛의 `MainPID`를 읽습니다. 우리가 보호한 그 프로세스를 정확히 가리키는 유일한 방법입니다.
+
+### `set -e` + `pipefail`에서 `pgrep` 대입이 스크립트를 죽인다
+
+```bash
+p=$(pgrep -x "$name" | head -1)    # 프로세스가 없으면 여기서 스크립트 종료
+```
+
+`pgrep`이 못 찾으면 종료코드 1, `pipefail` 때문에 파이프라인 전체가 1, 그러면 대입문 자체가 실패로 취급되어 `set -e`가 스크립트를 끝냅니다. `[[ ]] && cmd`나 `(( )) && cmd`는 `&&` 리스트의 마지막이 아니므로 안전한데, 이건 아닙니다. `|| true`가 필요합니다.
+
 ### earlyoom의 `-p`가 자기 `oom_score_adj`를 되돌린다
 
 `man earlyoom`: *"-p: set niceness of earlyoom to -20 and **oom_score_adj to -100**"*.

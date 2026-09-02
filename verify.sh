@@ -62,14 +62,14 @@ fi
 # sysinit 단계의 명시적 modprobe 유닛이 유일하게 동작하는 경로다.
 if systemctl is-enabled --quiet hw-watchdog-load.service 2>/dev/null; then
   ok "hw-watchdog-load.service enabled (부팅 시 모듈 로드)"
-  lsmod | grep -qE '^(iTCO_wdt|sp5100_tco|softdog)' && ok "워치독 모듈 로드됨" || bad "워치독 모듈 미로드"
+  lsmod | grep -qE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)' && ok "워치독 모듈 로드됨" || bad "워치독 모듈 미로드"
   lsmod | grep -q '^softdog' && info "softdog 폴백 - 커널이 완전히 얼면 동작하지 않음"
 else
   bad "hw-watchdog-load.service 미등록 - 재부팅하면 /dev/watchdog 이 사라집니다"
 fi
 [[ -f /etc/modules-load.d/hw-watchdog.conf ]] \
   && bad "/etc/modules-load.d/hw-watchdog.conf 잔존 - deny-list 때문에 무효"
-grep -qE '^(iTCO_wdt|sp5100_tco|softdog)$' /etc/initramfs-tools/modules 2>/dev/null \
+grep -qE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)$' /etc/initramfs-tools/modules 2>/dev/null \
   && bad "initramfs-tools/modules 잔존 - conf/modules 는 읽히지 않아 무효"
 RW="$(systemctl show -p RuntimeWatchdogUSec --value 2>/dev/null)"
 [[ -n "$RW" && "$RW" != "0" ]] && ok "RuntimeWatchdogSec = $RW" || bad "RuntimeWatchdogSec 미설정"
@@ -126,12 +126,20 @@ fi
   && ok "ssh@.service           drop-in 존재 (socket-activated 인스턴스용)"
 printf '  ------------------------------------------\n'
 ok "예약 합계 ${TOTAL}MiB"
-# 실행 중인 프로세스에 실제로 반영됐는지 확인 (유닛 재시작 없이 적용했으므로)
-for name in "${REMOTE_PROCS[@]:-sshd tailscaled rustdesk gdm3}"; do
-  p=$(pgrep -x "$name" 2>/dev/null | head -1); [[ -n $p ]] || continue
-  v=$(cat "/proc/$p/oom_score_adj" 2>/dev/null)
-  [[ "$v" == "-1000" ]] && ok "$name (pid $p) oom_score_adj=-1000" \
-                        || bad "$name (pid $p) oom_score_adj=$v"
+# 실행 중인 프로세스에 실제로 반영됐는지 확인 (유닛 재시작 없이 적용했으므로).
+#
+# 주의: pgrep -x <이름> 으로 찾으면 안 된다. 같은 이름의 프로세스가 여러 개일 때
+# 엉뚱한 것을 집는다. 실제로 한 서버에서 cron 이 띄운 별도 tailscaled 가
+# 시스템 tailscaled.service 보다 PID 가 낮아, 보호가 안 된 것처럼 보였다.
+# 유닛의 MainPID 를 쓰면 우리가 보호한 그 프로세스를 정확히 가리킨다.
+for entry in "${REMOTE_UNITS[@]}"; do
+  u="${entry%%:*}"
+  mp="$(systemctl show "$u" -p MainPID --value 2>/dev/null)"
+  [[ -n "$mp" && "$mp" != "0" && -r "/proc/$mp/oom_score_adj" ]] || continue
+  v=$(cat "/proc/$mp/oom_score_adj")
+  n=$(cat "/proc/$mp/comm" 2>/dev/null)
+  [[ "$v" == "-1000" ]] && ok "$u MainPID=$mp ($n) oom_score_adj=-1000" \
+                        || bad "$u MainPID=$mp ($n) oom_score_adj=$v"
 done
 
 hdr "5. 스왑"

@@ -43,9 +43,9 @@ for entry in "${REMOTE_UNITS[@]}" "user.slice:-"; do
 done
 
 echo "==> initramfs 워치독 항목 정리 (이전 버전 잔재)"
-if grep -qE '^(iTCO_wdt|sp5100_tco|softdog)$' /etc/initramfs-tools/modules 2>/dev/null; then
+if grep -qE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)$' /etc/initramfs-tools/modules 2>/dev/null; then
   sed -i '/oom-hardening/,+1d' /etc/initramfs-tools/modules
-  sed -i '/^\(iTCO_wdt\|sp5100_tco\|softdog\)$/d' /etc/initramfs-tools/modules
+  sed -i '/^\(iTCO_wdt\|sp5100_tco\|ipmi_watchdog\|softdog\)$/d' /etc/initramfs-tools/modules
   update-initramfs -u >/dev/null 2>&1 && echo "    initramfs 재생성 완료" \
     || echo "    update-initramfs 실패 - 수동 실행 필요"
 fi
