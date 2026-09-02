@@ -31,7 +31,8 @@ systemctl disable --now oom-sysctl-enforce.timer 2>/dev/null || true
 systemctl disable --now hw-watchdog-load.service 2>/dev/null || true
 rm -f /etc/systemd/system/oom-sysctl-enforce.service \
       /etc/systemd/system/oom-sysctl-enforce.timer \
-      /etc/systemd/system/hw-watchdog-load.service
+      /etc/systemd/system/hw-watchdog-load.service \
+      /usr/local/sbin/hw-watchdog-load
 for u in k3s.service kubelet.service k3s-agent.service; do
   rm -f "/etc/systemd/system/${u}.d/10-restore-panic-on-oom.conf"
   rmdir "/etc/systemd/system/${u}.d" 2>/dev/null || true

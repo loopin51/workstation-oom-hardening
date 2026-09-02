@@ -61,9 +61,24 @@ fi
 # 커널 패키지가 blacklist 하므로 modules-load.d 도 initramfs conf/modules 도 안 된다.
 # sysinit 단계의 명시적 modprobe 유닛이 유일하게 동작하는 경로다.
 if systemctl is-enabled --quiet hw-watchdog-load.service 2>/dev/null; then
-  ok "hw-watchdog-load.service enabled (부팅 시 모듈 로드)"
-  lsmod | grep -qE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)' && ok "워치독 모듈 로드됨" || bad "워치독 모듈 미로드"
-  lsmod | grep -q '^softdog' && info "softdog 폴백 - 커널이 완전히 얼면 동작하지 않음"
+  ok "hw-watchdog-load.service enabled (부팅 시 후보 순서대로 판정)"
+  M=$(lsmod | grep -oE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)' | head -1)
+  # 모듈이 로드된 것과 장치를 만든 것은 다르다. 둘 다 확인해야 한다.
+  if [[ -n "$M" && ( -c /dev/watchdog || -c /dev/watchdog0 ) ]]; then
+    ok "워치독 모듈 $M 이 장치를 제공 중"
+  elif [[ -n "$M" ]]; then
+    bad "$M 이 로드됐지만 워치독 장치가 없다 - 이 모듈은 이 보드에서 쓸 수 없다"
+    journalctl -k -b 0 --no-pager 2>/dev/null \
+      | grep -oE 'unable to reset NO_REBOOT.*|No MFD cells added' | head -1 \
+      | sed 's/^/         /'
+  else
+    bad "워치독 모듈 미로드"
+  fi
+  [[ "$M" == softdog ]] && info "softdog 폴백 - 커널이 완전히 얼면 동작하지 않음"
+  [[ "$M" == ipmi_watchdog ]] && ok "BMC 워치독 - 칩셋 워치독보다 낫다"
+  [[ -x /usr/local/sbin/hw-watchdog-load ]] || bad "/usr/local/sbin/hw-watchdog-load 없음"
+  journalctl -b 0 -u hw-watchdog-load --no-pager -o cat 2>/dev/null | grep -m1 '채택\|만들지 못함' \
+    | sed 's/^/  [i]    부팅 판정: /'
 else
   bad "hw-watchdog-load.service 미등록 - 재부팅하면 /dev/watchdog 이 사라집니다"
 fi

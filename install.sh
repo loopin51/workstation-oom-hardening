@@ -259,64 +259,113 @@ fi
 [[ -e /dev/ipmi0 || -e /dev/ipmi/0 || -e /dev/ipmidev/0 ]] && CANDIDATES+=(ipmi_watchdog)
 CANDIDATES+=(softdog)
 
-WDT_MOD=""
-for m in "${CANDIDATES[@]}"; do
-  if modprobe "$m" 2>/dev/null && [[ -e /dev/watchdog ]]; then
-    WDT_MOD="$m"; break
-  fi
-done
+echo "  후보 순서: ${CANDIDATES[*]}"
 
-if [[ -z "$WDT_MOD" ]]; then
-  warn "워치독 장치를 만들지 못했습니다. RuntimeWatchdogSec 는 무시됩니다."
-  warn "BIOS 에서 'Watch Dog Timer' / 'WDT' 항목을 Enabled 로 바꾸면 될 수 있습니다."
+# --- 어느 모듈을 쓸지는 "부팅 시점"에 정한다 -------------------------------
+#
+# 설치 시점에 판정하면 안 된다. 이미 다른 워치독 모듈이 물려 있으면
+# /dev/watchdog 이 존재한다는 사실만으로는 어느 모듈이 만든 것인지 구분할 수
+# 없기 때문이다. 실제로 이 함정에 빠졌다: 이전 부팅의 softdog 이 물려 있는
+# 상태에서 재실행하니, iTCO_wdt 는 모듈만 올라가고 장치를 못 만드는데도
+# (BIOS 가 NO_REBOOT 플래그로 막아둠) /dev/watchdog 이 보여서 동작한다고
+# 오판했다. 재부팅 후 softdog 이 없어지자 워치독이 통째로 사라졌다.
+#
+# 부팅 직후에는 워치독 모듈이 하나도 없으므로 판정이 명확하다.
+# 후보를 순서대로 올려 보고, 장치를 실제로 만든 첫 모듈을 채택한다.
+# 실패한 모듈은 즉시 내려 다음 후보를 오염시키지 않는다.
+cat > /usr/local/sbin/hw-watchdog-load <<EOF
+#!/bin/sh
+# workstation-oom-hardening -- 부팅 시 워치독 모듈 선택
+# $DOC_URL
+#
+# 후보를 순서대로 시도해 /dev/watchdog 을 실제로 만드는 첫 모듈을 채택한다.
+# 모듈이 로드되는 것과 장치를 만드는 것은 다르다:
+#   iTCO_wdt: unable to reset NO_REBOOT flag, device disabled by hardware/BIOS
+# 위 경우 modprobe 는 성공하지만 워치독 장치는 생기지 않는다.
+set -u
+for m in ${CANDIDATES[*]}; do
+    modprobe "\$m" 2>/dev/null || continue
+    if [ -c /dev/watchdog ] || [ -c /dev/watchdog0 ]; then
+        echo "hw-watchdog: \$m 채택"
+        exit 0
+    fi
+    # 장치를 못 만들었으면 내려서 다음 후보 판정을 방해하지 않게 한다
+    modprobe -r "\$m" 2>/dev/null || true
+    echo "hw-watchdog: \$m 은 장치를 만들지 못함, 다음 후보로"
+done
+echo "hw-watchdog: 사용 가능한 워치독 없음" >&2
+exit 0
+EOF
+chmod 755 /usr/local/sbin/hw-watchdog-load
+
+# 지금 무장할 수 있는지 판단한다.
+# 이미 워치독이 물려 있으면(systemd 가 잡고 있어 내릴 수도 없다) 판정이
+# 불가능하므로 건드리지 않고 다음 부팅으로 미룬다.
+if [[ -c /dev/watchdog || -c /dev/watchdog0 ]]; then
+  CUR="$(cat /sys/class/watchdog/watchdog0/identity 2>/dev/null || echo unknown)"
+  warn "이미 워치독이 물려 있습니다 ($CUR). 지금은 재판정하지 않습니다."
+  warn "다음 부팅 때 후보 순서대로 다시 고릅니다."
 else
-  echo "  사용 모듈: $WDT_MOD"
+  # 깨끗한 상태이므로 지금 판정해도 안전하다
+  /usr/local/sbin/hw-watchdog-load | sed 's/^/  /'
+fi
+
+WDT_MOD="$(lsmod | grep -oE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)' | head -1)" || true
+if [[ -z "$WDT_MOD" ]]; then
+  warn "현재 로드된 워치독 모듈이 없습니다."
+else
+  echo "  현재 모듈: $WDT_MOD"
   sed 's/^/  identity: /' /sys/class/watchdog/watchdog0/identity 2>/dev/null || true
   case "$WDT_MOD" in
     softdog)
       warn "softdog 폴백입니다. 커널이 완전히 얼어붙으면 동작하지 않습니다."
-      if journalctl -k -b 0 --no-pager 2>/dev/null | grep -q 'No MFD cells added'; then
-        warn "원인: lpc_ich 가 MFD 셀을 만들지 못했습니다 (BMC 가 TCO 영역 점유)."
-        warn "이 보드에서는 칩셋 워치독을 쓸 수 없습니다."
-      fi
+      journalctl -k -b 0 --no-pager 2>/dev/null | grep -qE 'No MFD cells added|unable to reset NO_REBOOT' && {
+        warn "원인: 이 보드는 칩셋 워치독이 BIOS/BMC 에 의해 막혀 있습니다."
+        journalctl -k -b 0 --no-pager 2>/dev/null | grep -oE 'unable to reset NO_REBOOT.*' | head -1 | sed 's/^/      /'
+      } || true
       ;;
     ipmi_watchdog)
       echo "  BMC 워치독입니다. 칩셋 워치독보다 낫습니다 (BMC 가 직접 리셋)."
       ;;
   esac
+fi
 
-  # --- 부팅 시 자동 로드 -------------------------------------------------
-  # 표준 경로 두 개가 모두 막혀 있다:
-  #
-  #  1) /etc/modules-load.d/ -- 배포판 커널 패키지가
-  #     /usr/lib/modprobe.d/blacklist_*.conf 에서 워치독 모듈을 blacklist 하고,
-  #     systemd-modules-load 는 deny-list 된 모듈을 거부한다.
-  #     ("Module 'iTCO_wdt' is deny-listed (by kmod)")
-  #
-  #  2) /etc/initramfs-tools/modules -- initramfs-tools 는 load_modules() 를
-  #     scripts/functions 에 정의만 해두고 init 어디에서도 호출하지 않는다.
-  #     conf/modules 가 생성되지만 읽히지 않는다. 모듈과 의존성이 initrd 에
-  #     들어갔는데도 로드되지 않는 것을 확인했다.
-  #
-  # blacklist 는 alias 자동 로드만 막고 명시적 modprobe 는 막지 않으므로,
-  # sysinit 단계에서 직접 modprobe 하는 유닛을 쓴다. 모듈이 올라오면
-  # systemd(PID 1)가 다음 핑 주기에 장치 열기를 재시도해 자동으로 무장한다.
-  rm -f /etc/modules-load.d/hw-watchdog.conf
-  if grep -qE '^(iTCO_wdt|sp5100_tco|softdog)$' /etc/initramfs-tools/modules 2>/dev/null; then
-    backup /etc/initramfs-tools/modules
-    sed -i '/oom-hardening/,+1d' /etc/initramfs-tools/modules
-    sed -i '/^\(iTCO_wdt\|sp5100_tco\|softdog\)$/d' /etc/initramfs-tools/modules
-    echo "  이전 initramfs 항목 제거 (동작하지 않는 경로)"
-    update-initramfs -u >/dev/null 2>&1 || warn "update-initramfs 실패 (무해)"
-  fi
+# --- 부팅 시 자동 로드 -----------------------------------------------------
+# 표준 경로 두 개가 모두 막혀 있다:
+#
+#  1) /etc/modules-load.d/ -- 배포판 커널 패키지가
+#     /usr/lib/modprobe.d/blacklist_*.conf 에서 워치독 모듈을 blacklist 하고,
+#     systemd-modules-load 는 deny-list 된 모듈을 거부한다.
+#     ("Module 'iTCO_wdt' is deny-listed (by kmod)")
+#
+#  2) /etc/initramfs-tools/modules -- initramfs-tools 는 load_modules() 를
+#     scripts/functions 에 정의만 해두고 init 어디에서도 호출하지 않는다.
+#     conf/modules 가 생성되지만 읽히지 않는다. 모듈과 의존성이 initrd 에
+#     들어갔는데도 로드되지 않는 것을 확인했다.
+#
+# blacklist 는 alias 자동 로드만 막고 명시적 modprobe 는 막지 않으므로,
+# sysinit 단계에서 위 선택 스크립트를 돌린다. 장치가 생기면 systemd(PID 1)가
+# 다음 핑 주기에 열기를 재시도해 자동으로 무장한다.
+rm -f /etc/modules-load.d/hw-watchdog.conf
+if grep -qE '^(iTCO_wdt|sp5100_tco|ipmi_watchdog|softdog)$' /etc/initramfs-tools/modules 2>/dev/null; then
+  backup /etc/initramfs-tools/modules
+  sed -i '/oom-hardening/,+1d' /etc/initramfs-tools/modules
+  sed -i '/^\(iTCO_wdt\|sp5100_tco\|ipmi_watchdog\|softdog\)$/d' /etc/initramfs-tools/modules
+  echo "  이전 initramfs 항목 제거 (동작하지 않는 경로)"
+  update-initramfs -u >/dev/null 2>&1 || warn "update-initramfs 실패 (무해)"
+fi
 
-  cat > /etc/systemd/system/hw-watchdog-load.service <<EOF
+cat > /etc/systemd/system/hw-watchdog-load.service <<EOF
 [Unit]
-Description=Load hardware watchdog module ($WDT_MOD)
+Description=Select and load hardware watchdog module
 Documentation=$DOC_URL
 # 커널 패키지가 blacklist 해 두어 systemd-modules-load 가 거부하고,
 # initramfs-tools 의 conf/modules 경로도 동작하지 않는다.
 # blacklist 는 alias 자동 로드만 막으므로 명시적 modprobe 로 우회한다.
+#
+# 어느 모듈을 쓸지는 부팅 시점에 정한다. 모듈이 로드되는 것과 워치독 장치를
+# 만드는 것은 다르므로(BIOS 가 막아둔 경우 등), 실제로 /dev/watchdog 이
+# 생기는지 확인하고 안 되면 다음 후보로 넘어간다.
 DefaultDependencies=no
 After=systemd-modules-load.service
 Before=sysinit.target shutdown.target
@@ -325,15 +374,14 @@ Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/sbin/modprobe $WDT_MOD
+ExecStart=/usr/local/sbin/hw-watchdog-load
 
 [Install]
 WantedBy=sysinit.target
 EOF
-  systemctl daemon-reload
-  systemctl enable hw-watchdog-load.service >/dev/null 2>&1
-  echo "  hw-watchdog-load.service 등록 (sysinit 단계에서 명시적 modprobe)"
-fi
+systemctl daemon-reload
+systemctl enable hw-watchdog-load.service >/dev/null 2>&1
+echo "  hw-watchdog-load.service 등록 (부팅 시 후보 순서대로 판정)"
 
 mkdir -p /etc/systemd/system.conf.d
 backup /etc/systemd/system.conf.d/10-watchdog.conf
