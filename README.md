@@ -124,6 +124,8 @@ iTCO_wdt iTCO_wdt: unable to reset NO_REBOOT flag, device disabled by hardware/B
 
 `softdog`까지 내려가면 커널이 완전히 얼었을 때는 못 잡습니다. 그 경우 `install.sh`가 `No MFD cells added` 로그를 확인해서 원인을 함께 알려줍니다.
 
+BMC 워치독에는 부팅 시 경쟁 조건이 하나 있습니다. `hw-watchdog-load.service`는 `sysinit.target` 전에 도는데, 그 시점에 BMC 인터페이스가 아직 안 올라와 있으면 `ipmi_watchdog`이 장치를 못 만들고 **조용히 softdog으로 떨어집니다.** 실측으로 `ipmi_si: IPMI kcs interface initialized`가 부팅 후 약 7초에 떴습니다. 그래서 선택 스크립트는 `ipmi_watchdog`을 시도하기 전에 `/dev/ipmi0`이 나타날 때까지 최대 12초 기다립니다.
+
 ### `pgrep <이름>`으로 검증하면 엉뚱한 프로세스를 본다
 
 한 서버에서 `tailscaled`의 `oom_score_adj`가 0으로 보여 보호가 안 된 줄 알았습니다. 실제로는 tailscaled가 두 개였습니다.

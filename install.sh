@@ -284,6 +284,22 @@ cat > /usr/local/sbin/hw-watchdog-load <<EOF
 # 위 경우 modprobe 는 성공하지만 워치독 장치는 생기지 않는다.
 set -u
 for m in ${CANDIDATES[*]}; do
+    if [ "\$m" = ipmi_watchdog ]; then
+        # BMC 인터페이스가 먼저 올라와야 ipmi_watchdog 이 장치를 만든다.
+        # 이 유닛은 sysinit.target 전에 돌기 때문에 부팅 초기에는 ipmi_si 가
+        # 아직 BMC 를 찾지 못했을 수 있다. 실측: 부팅 후 약 7초에
+        # "ipmi_si: IPMI kcs interface initialized" 가 뜬다.
+        # 기다리지 않으면 조용히 softdog 으로 떨어진다.
+        modprobe ipmi_si 2>/dev/null || true
+        modprobe ipmi_devintf 2>/dev/null || true
+        i=0
+        while [ "\$i" -lt 60 ]; do
+            [ -e /dev/ipmi0 ] || [ -e /dev/ipmi/0 ] || [ -e /dev/ipmidev/0 ] && break
+            sleep 0.2
+            i=\$((i+1))
+        done
+        [ "\$i" -gt 0 ] && echo "hw-watchdog: BMC 인터페이스 대기 \$((i*2))00ms"
+    fi
     modprobe "\$m" 2>/dev/null || continue
     if [ -c /dev/watchdog ] || [ -c /dev/watchdog0 ]; then
         echo "hw-watchdog: \$m 채택"
